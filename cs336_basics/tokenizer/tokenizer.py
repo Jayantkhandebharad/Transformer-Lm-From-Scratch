@@ -34,7 +34,11 @@ class Tokenizer:
         if special_tokens is None:
             special_tokens = []
         
-        self.special_tokens = special_tokens
+        self.special_tokens = sorted(
+            special_tokens or [],
+            key=len,
+            reverse=True,
+        )
         self.special_tokens_bytes = {tok.encode("utf-8") for tok in special_tokens}
 
     

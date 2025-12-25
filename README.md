@@ -63,3 +63,9 @@ uv run python scripts/train_save_bpe.py `
   --output_dir artifacts/tokenizers `
   --name corpus_en_500
 ```
+
+#### Issue a.1.1
+- We have created tokenizer.py file and inside it we have Tokenizer class. to test the tokenizer class we need to run `uv run pytest tests/test_tokenizer.py`. but test_tokenizer.py contains some packages like 'resource' which cannot be loaded on windows, so we need mac or linux to run those.
+- other resone to use linux or macOS is `open()` defaults to UTF-8, while on whidows it defaults to `cp1252` encoding. and gpt2_merges.txt contains byte-mapped unicode character by design and cp1252 cannot decoad them.
+#### solution a.1.1
+- replaceing `with open(merges_path) as f:` with `with open(merges_path, encoding="utf-8") as f:`/
