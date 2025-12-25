@@ -415,7 +415,52 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    raise NotImplementedError
+    # if dataset.ndim != 1:
+    #     raise ValueError(f"Expected 1D dataset array, got shape {dataset.shape}")
+    # n = int(dataset.shape[0])
+    # if context_length<=0:
+    #     raise ValueError(f"Expected context_length to be positive, got {context_length}")
+    
+    # if batch_size<=0:
+    #     raise ValueError(f"Expected batch_size to be positive, got {batch_size}")
+    
+    # if n <= context_length:
+    #     raise ValueError(
+    #         f"Dataset too small (len={n}) for context_length={context_length}"
+    #     )
+    
+    # # valid start indices are [0,n-context_length-1] inclusive
+    # # That's `n-context_length` possible starting positions.
+    # num_starts = n-context_length
+
+    # # convert numpy -> torch on CPU (cheap, no GPU assumption yet)
+    # # cast to long because embedding layers expect long indices in torch.long
+    # data = torch.from_numpy(dataset).to(dtype=torch.long)
+
+    # # Randomly pich start position for each example in the batch.
+    # # torch.randint upper bound is exclusive, so use `num_starts`
+    # starts = torch.randint(low=0, high=num_starts,size=(batch_size,), device="cpu")
+
+    # #building indices for each window: start[:,None] + [0..T-1]
+    # offsets = torch.arange(context_length,device="cpu")
+    # idx = starts[:,None] + offsets[None,:]
+
+    # x = data[idx]
+    # y = data[idx+1]
+
+    # x=x.to(device)
+    # y=y.to(device)
+
+    # return x,y
+
+    from cs336_basics.training.dataloader import get_batch
+
+    return get_batch(
+        dataset=dataset,
+        batch_size=batch_size,
+        context_length=context_length,
+        device=device,
+    )
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
