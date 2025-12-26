@@ -29,7 +29,15 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    # raise NotImplementedError
+    # Validate shapes (defensive, helps debugging)
+    assert weights.shape == (d_out, d_in)
+    assert in_features.shape[-1] == d_in
+
+    # Core linear operation
+    # in_features: (..., d_in)
+    # weights.T: (d_in, d_out)
+    return in_features @ weights.T
 
 
 def run_embedding(
@@ -51,7 +59,14 @@ def run_embedding(
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
 
-    raise NotImplementedError
+    # raise NotImplementedError
+    # Defensive checks (useful while debugging)
+    assert weights.shape == (vocab_size, d_model)
+    assert token_ids.dtype in (torch.int32, torch.int64)
+
+    # Core embedding lookup
+    return weights[token_ids]
+
 
 
 def run_swiglu(
@@ -62,28 +77,26 @@ def run_swiglu(
     w3_weight: Float[Tensor, " d_ff d_model"],
     in_features: Float[Tensor, " ... d_model"],
 ) -> Float[Tensor, " ... d_model"]:
-    """Given the weights of a SwiGLU network, return
-    the output of your implementation with these weights.
-
-    Args:
-        d_model (int): Dimensionality of the feedforward input and output.
-        d_ff (int): Dimensionality of the up-project happening internally to your swiglu.
-        w1_weight (Float[Tensor, "d_ff d_model"]): Stored weights for W1
-        w2_weight (Float[Tensor, "d_model d_ff"]): Stored weights for W2
-        w3_weight (Float[Tensor, "d_ff d_model"]): Stored weights for W3
-        in_features (Float[Tensor, "... d_model"]): Input embeddings to the feed-forward layer.
-
-    Returns:
-        Float[Tensor, "... d_model"]: Output embeddings of the same shape as the input embeddings.
     """
-    # Example:
-    # If your state dict keys match, you can use `load_state_dict()`
-    # swiglu.load_state_dict(weights)
-    # You can also manually assign the weights
-    # swiglu.w1.weight.data = w1_weight
-    # swiglu.w2.weight.data = w2_weight
-    # swiglu.w3.weight.data = w3_weight
-    raise NotImplementedError
+    SwiGLU feed-forward network:
+        out = W2( SiLU(W1(x)) * W3(x) )
+    """
+    # Defensive shape checks
+    assert in_features.shape[-1] == d_model
+    assert w1_weight.shape == (d_ff, d_model)
+    assert w3_weight.shape == (d_ff, d_model)
+    assert w2_weight.shape == (d_model, d_ff)
+
+    # Linear projections
+    x1 = in_features @ w1_weight.T   # (..., d_ff)
+    x3 = in_features @ w3_weight.T   # (..., d_ff)
+
+    # SwiGLU gating
+    gated = torch.sigmoid(x1) * x1 * x3   # SiLU(x1) * x3
+
+    # Down projection
+    out = gated @ w2_weight.T             # (..., d_model)
+    return out
 
 
 def run_scaled_dot_product_attention(
@@ -300,7 +313,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
@@ -364,21 +377,22 @@ def run_rmsnorm(
     weights: Float[Tensor, " d_model"],
     in_features: Float[Tensor, " ... d_model"],
 ) -> Float[Tensor, " ... d_model"]:
-    """Given the weights of a RMSNorm affine transform,
-    return the output of running RMSNorm on the input features.
-
-    Args:
-        d_model (int): The dimensionality of the RMSNorm input.
-        eps: (float): A value added to the denominator for numerical stability.
-        weights (Float[Tensor, "d_model"]): RMSNorm weights.
-        in_features (Float[Tensor, "... d_model"]): Input features to run RMSNorm on. Can have arbitrary leading
-            dimensions.
-
-    Returns:
-        Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
-        RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+    Root Mean Square Layer Normalization.
+    """
+    assert in_features.shape[-1] == d_model
+    assert weights.shape == (d_model,)
+
+    # Compute RMS in float32 for numerical stability
+    x = in_features.float()
+    rms = torch.sqrt(torch.mean(x * x, dim=-1, keepdim=True) + eps)
+
+    # Normalize and apply learned scale
+    out = (x / rms) * weights
+
+    # Return in original dtype
+    return out.to(in_features.dtype)
+
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
@@ -392,7 +406,7 @@ def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
         Float[Tensor,"..."]: of with the same shape as `in_features` with the output of applying
         SiLU to each element.
     """
-    raise NotImplementedError
+    return in_features * torch.sigmoid(in_features)
 
 
 def run_get_batch(
