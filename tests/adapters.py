@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Iterable
 from typing import IO, Any, BinaryIO
@@ -117,7 +118,29 @@ def run_scaled_dot_product_attention(
     Returns:
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
-    raise NotImplementedError
+    # raise NotImplementedError
+    d_k = Q.shape[-1]
+    assert K.shape[-1] == d_k
+    assert K.shape[-2] == V.shape[-2] # number of keys == number of values
+
+    # 1) raw similarity scores: (..., queries, keys)
+    scores = Q @ K.transpose(-2,-1)
+
+    # 2) scale
+    scores = scores/(d_k ** 0.5)
+
+    # 3) apply boolean mask (False -> -inf so softmax -> 0 probability)
+    if mask is not None:
+        scores = scores.masked_fill(~mask,float("-inf"))
+    
+    # 4) stable softmax over keys dimension
+    score_max = scores.max(dim=-1,keepdim=True).values
+    exp_scores = torch.exp(scores - score_max)
+    attn_weights = exp_scores / exp_scores.sum(dim=-1, keepdim=True)
+
+    # 5) weighted sum of values
+    out = attn_weights @ V
+    return out
 
 
 def run_multihead_self_attention(
@@ -151,7 +174,39 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+    # raise NotImplementedError
+    B, T, _ = in_features.shape
+    d_k = d_model // num_heads
+
+    # 1. Projections
+    Q = in_features @ q_proj_weight.T
+    K = in_features @ k_proj_weight.T
+    V = in_features @ v_proj_weight.T
+
+    # 2. Split heads
+    Q = Q.view(B, T, num_heads, d_k).transpose(1, 2)
+    K = K.view(B, T, num_heads, d_k).transpose(1, 2)
+    V = V.view(B, T, num_heads, d_k).transpose(1, 2)
+
+    # 3. Attention (CAUSAL)
+    scores = Q @ K.transpose(-2, -1)
+    scores = scores / math.sqrt(d_k)
+
+    # causal mask
+    mask = torch.tril(
+        torch.ones(T, T, device=in_features.device, dtype=torch.bool)
+    )
+    scores = scores.masked_fill(~mask, float("-inf"))
+
+    attn = torch.softmax(scores, dim=-1)
+    context = attn @ V
+
+    # 4. Merge heads
+    context = context.transpose(1, 2).contiguous()
+    context = context.view(B, T, d_model)
+
+    # 5. Output projection
+    return context @ o_proj_weight.T
 
 
 def run_multihead_self_attention_with_rope(
@@ -191,7 +246,64 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    raise NotImplementedError
+
+    """
+    Multi-Head Self-Attention with RoPE (causal).
+    RoPE is applied to Q and K (not V) after splitting into heads.
+    """
+    B, T, _ = in_features.shape
+    assert d_model % num_heads == 0
+    d_k = d_model // num_heads
+    assert d_k % 2 == 0, "RoPE requires per-head dimension to be even."
+
+    # 1) Projections (single matmul per Q/K/V)
+    Q = in_features @ q_proj_weight.T  # (B, T, d_model)
+    K = in_features @ k_proj_weight.T
+    V = in_features @ v_proj_weight.T
+
+    # 2) Split into heads: (B, H, T, d_k)
+    Q = Q.view(B, T, num_heads, d_k).transpose(1, 2)
+    K = K.view(B, T, num_heads, d_k).transpose(1, 2)
+    V = V.view(B, T, num_heads, d_k).transpose(1, 2)
+
+    # 3) Build / normalize token positions to shape (B, T) for broadcasting
+    if token_positions is None:
+        pos = torch.arange(T, device=in_features.device, dtype=torch.long).unsqueeze(0).expand(B, T)
+    else:
+        pos = token_positions.to(device=in_features.device, dtype=torch.long)
+        if pos.dim() == 1:
+            # (T,) -> (B, T)
+            pos = pos.unsqueeze(0).expand(B, T)
+        elif pos.dim() == 2 and pos.shape[0] == 1:
+            # (1, T) -> (B, T)
+            pos = pos.expand(B, T)
+        else:
+            # assume already (B, T) or broadcastable
+            pass
+
+    # Expand to match (B, H, T) so it broadcasts inside run_rope
+    pos_bh = pos.unsqueeze(1).expand(B, num_heads, T)  # (B, H, T)
+
+    # 4) Apply RoPE to Q and K (per head dimension d_k)
+    Q = run_rope(d_k=d_k, theta=theta, max_seq_len=max_seq_len, in_query_or_key=Q, token_positions=pos_bh)
+    K = run_rope(d_k=d_k, theta=theta, max_seq_len=max_seq_len, in_query_or_key=K, token_positions=pos_bh)
+
+    # 5) Scaled dot-product attention + causal mask
+    scores = Q @ K.transpose(-2, -1)  # (B, H, T, T)
+    scores = scores / math.sqrt(d_k)
+
+    causal = torch.tril(torch.ones(T, T, device=in_features.device, dtype=torch.bool))
+    scores = scores.masked_fill(~causal, float("-inf"))
+
+    attn = torch.softmax(scores, dim=-1)
+    context = attn @ V  # (B, H, T, d_k)
+
+    # 6) Merge heads back: (B, T, d_model)
+    context = context.transpose(1, 2).contiguous().view(B, T, d_model)
+
+    # 7) Output projection
+    out = context @ o_proj_weight.T
+    return out
 
 
 def run_rope(
@@ -202,18 +314,47 @@ def run_rope(
     token_positions: Int[Tensor, " ... sequence_length"],
 ) -> Float[Tensor, " ... sequence_length d_k"]:
     """
-    Run RoPE for a given input tensor.
+    Apply Rotary Positional Embedding (RoPE) to the last dimension of in_query_or_key.
 
-    Args:
-        d_k (int): Embedding dimension size for the query or key tensor.
-        theta (float): RoPE parameter.
-        max_seq_len (int): Maximum sequence length to pre-cache if your implementation does that.
-        in_query_or_key (Float[Tensor, "... sequence_length d_k"]): Input tensor to run RoPE on.
-        token_positions (Int[Tensor, "... sequence_length"]): Tensor of shape (batch_size, sequence_length) with the token positions
-    Returns:
-        Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
+    RoPE rotates pairs of features (even, odd) by position-dependent angles.
+    Supports token_positions as shape (seq,) or (..., seq).
     """
-    raise NotImplementedError
+    assert d_k % 2 == 0, "RoPE requires d_k to be even (pairs of dimensions)."
+    assert in_query_or_key.shape[-1] == d_k
+
+    device = in_query_or_key.device
+    dtype = in_query_or_key.dtype
+
+    # token_positions may be (seq,) or (..., seq)
+    # Ensure it broadcasts with in_query_or_key[..., seq, d_k]
+    pos = token_positions.to(device=device)
+
+    # Build inverse frequencies: (d_k/2,)
+    half = d_k // 2
+    i = torch.arange(0, half, device=device, dtype=torch.float32)
+    inv_freq = theta ** (-2.0 * i / d_k)  # (half,)
+
+    # angles: (..., seq, half)
+    # pos: (..., seq) -> (..., seq, 1) multiplied by (half,) -> broadcast
+    angles = pos[..., None].to(torch.float32) * inv_freq[None, ...]
+    cos = torch.cos(angles).to(dtype=dtype)
+    sin = torch.sin(angles).to(dtype=dtype)
+
+    # Split into even/odd dims
+    x_even = in_query_or_key[..., 0::2]  # (..., seq, half)
+    x_odd  = in_query_or_key[..., 1::2]  # (..., seq, half)
+
+    # Rotate
+    out_even = x_even * cos - x_odd * sin
+    out_odd  = x_even * sin + x_odd * cos
+
+    # Interleave back to (..., seq, d_k)
+    out = torch.empty_like(in_query_or_key)
+    out[..., 0::2] = out_even
+    out[..., 1::2] = out_odd
+    return out
+
+
 
 
 def run_transformer_block(
