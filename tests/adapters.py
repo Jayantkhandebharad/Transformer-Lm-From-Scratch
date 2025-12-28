@@ -251,6 +251,7 @@ def run_multihead_self_attention_with_rope(
     Multi-Head Self-Attention with RoPE (causal).
     RoPE is applied to Q and K (not V) after splitting into heads.
     """
+    
     B, T, _ = in_features.shape
     assert d_model % num_heads == 0
     d_k = d_model // num_heads
@@ -304,6 +305,7 @@ def run_multihead_self_attention_with_rope(
     # 7) Output projection
     out = context @ o_proj_weight.T
     return out
+
 
 
 def run_rope(
@@ -427,7 +429,55 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    raise NotImplementedError
+    x = in_features
+
+    # RMSNorm #1
+    x_norm = run_rmsnorm(
+        d_model=d_model,
+        eps=1e-5,
+        weights=weights["ln1.weight"],
+        in_features=x,
+    )
+
+    # MHA + RoPE (causal)
+    attn_out = run_multihead_self_attention_with_rope(
+        d_model=d_model,
+        num_heads=num_heads,
+        max_seq_len=max_seq_len,
+        theta=theta,
+        q_proj_weight=weights["attn.q_proj.weight"],
+        k_proj_weight=weights["attn.k_proj.weight"],
+        v_proj_weight=weights["attn.v_proj.weight"],
+        o_proj_weight=weights["attn.output_proj.weight"],
+        in_features=x_norm,
+        token_positions=None,  # default 0..T-1
+    )
+
+    # Residual
+    x = x + attn_out
+
+    # --- FFN sublayer (Pre-Norm) ---
+    x_norm2 = run_rmsnorm(
+        d_model=d_model,
+        eps=1e-5,
+        weights=weights["ln2.weight"],
+        in_features=x,
+    )
+
+    ffn_out = run_swiglu(
+        d_model=d_model,
+        d_ff=d_ff,
+        w1_weight=weights["ffn.w1.weight"],
+        w2_weight=weights["ffn.w2.weight"],
+        w3_weight=weights["ffn.w3.weight"],
+        in_features=x_norm2,
+    )
+
+    # Residual
+    x = x + ffn_out
+    return x
+
+    # raise NotImplementedError
 
 
 def run_transformer_lm(
@@ -509,7 +559,57 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    raise NotImplementedError
+    B, T = in_indices.shape
+    assert T <= context_length, "Input sequence length must be <= context_length"
+
+    # 1) Token embeddings: (B, T, d_model)
+    token_emb_w = weights["token_embeddings.weight"]  # (vocab_size, d_model)
+    x = run_embedding(
+        vocab_size=vocab_size,
+        d_model=d_model,
+        weights=token_emb_w,
+        token_ids=in_indices,
+    )
+
+    # 2) Transformer blocks
+    for layer_idx in range(num_layers):
+        prefix = f"layers.{layer_idx}."
+
+        block_weights = {
+            "attn.q_proj.weight": weights[prefix + "attn.q_proj.weight"],
+            "attn.k_proj.weight": weights[prefix + "attn.k_proj.weight"],
+            "attn.v_proj.weight": weights[prefix + "attn.v_proj.weight"],
+            "attn.output_proj.weight": weights[prefix + "attn.output_proj.weight"],
+            "ln1.weight": weights[prefix + "ln1.weight"],
+            "ffn.w1.weight": weights[prefix + "ffn.w1.weight"],
+            "ffn.w2.weight": weights[prefix + "ffn.w2.weight"],
+            "ffn.w3.weight": weights[prefix + "ffn.w3.weight"],
+            "ln2.weight": weights[prefix + "ln2.weight"],
+        }
+
+        x = run_transformer_block(
+            d_model=d_model,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            max_seq_len=context_length,
+            theta=rope_theta,
+            weights=block_weights,
+            in_features=x,
+        )
+
+    # 3) Final RMSNorm
+    x = run_rmsnorm(
+        d_model=d_model,
+        eps=1e-5,
+        weights=weights["ln_final.weight"],
+        in_features=x,
+    )
+
+    # 4) LM head projection -> logits (B, T, vocab_size)
+    lm_head_w = weights["lm_head.weight"]  # (vocab_size, d_model)
+    logits = x @ lm_head_w.T
+    return logits
+
 
 
 def run_rmsnorm(
